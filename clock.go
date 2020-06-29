@@ -3,12 +3,11 @@ package bigcache
 import "time"
 
 type clock interface {
-	epoch() int64
+	epoch() uint64
 }
 
-type systemClock struct {
-}
+type systemClock struct{}
 
-func (c systemClock) epoch() int64 {
-	return time.Now().Unix()
+func (c systemClock) epoch() uint64 {
+	return uint64(time.Now().Unix())
 }

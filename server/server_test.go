@@ -22,7 +22,6 @@ func testCacheSetup() {
 		LifeWindow:         10 * time.Minute,
 		MaxEntriesInWindow: 1000 * 10 * 60,
 		MaxEntrySize:       500,
-		Verbose:            true,
 		HardMaxCacheSize:   8192,
 		OnRemove:           nil,
 	})

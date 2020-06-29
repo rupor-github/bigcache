@@ -35,7 +35,6 @@ var (
 )
 
 func init() {
-	flag.BoolVar(&config.Verbose, "v", false, "Verbose logging.")
 	flag.IntVar(&config.Shards, "shards", 1024, "Number of shards for the cache.")
 	flag.IntVar(&config.MaxEntriesInWindow, "maxInWindow", 1000*10*60, "Used only in initial memory allocation.")
 	flag.DurationVar(&config.LifeWindow, "lifetime", 100000*100000*60, "Lifetime of each cache object.")

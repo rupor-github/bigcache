@@ -48,3 +48,15 @@ func objectsAreEqual(expected, actual interface{}) bool {
 	}
 	return bytes.Equal(exp, act)
 }
+
+type testLogger struct {
+	t *testing.T
+}
+
+func (t *testLogger) Printf(format string, args ...interface{}) {
+	t.t.Logf(format, args...)
+}
+
+func newTestLogger(t *testing.T) Logger {
+	return &testLogger{t}
+}

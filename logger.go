@@ -5,26 +5,24 @@ import (
 	"os"
 )
 
-// Logger is invoked when `Config.Verbose=true`
+// Logger interface.
 type Logger interface {
 	Printf(format string, v ...interface{})
 }
 
-// this is a safeguard, breaking on compile time in case
-// `log.Logger` does not adhere to our `Logger` interface.
-// see https://golang.org/doc/faq#guarantee_satisfies_interface
+// this is a safeguard, breaking on compile time in case log.Logger does not implement Logger interface.
 var _ Logger = &log.Logger{}
 
-// DefaultLogger returns a `Logger` implementation
-// backed by stdlib's log
-func DefaultLogger() *log.Logger {
-	return log.New(os.Stdout, "", log.LstdFlags)
+type nopLogger struct{}
+
+func (*nopLogger) Printf(_ string, _ ...interface{}) {}
+
+// NopLogger returns `empty` logger with no output.
+func newNopLogger() Logger {
+	return &nopLogger{}
 }
 
-func newLogger(custom Logger) Logger {
-	if custom != nil {
-		return custom
-	}
-
-	return DefaultLogger()
+// DefaultLogger returns implementation backed by stdlib's log.
+func DefaultLogger() Logger {
+	return log.New(os.Stdout, "", log.LstdFlags)
 }

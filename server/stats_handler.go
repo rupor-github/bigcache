@@ -6,7 +6,7 @@ import (
 	"net/http"
 )
 
-// index for stats handle
+// index for stats handle.
 func statsIndexHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -19,7 +19,7 @@ func statsIndexHandler() http.Handler {
 }
 
 // returns the cache's statistics.
-func getCacheStatsHandler(w http.ResponseWriter, r *http.Request) {
+func getCacheStatsHandler(w http.ResponseWriter, _ *http.Request) {
 	target, err := json.Marshal(cache.Stats())
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -28,6 +28,5 @@ func getCacheStatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// since we're sending a struct, make it easy for consumers to interface.
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Write(target)
-	return
+	_, _ = w.Write(target)
 }

@@ -1,361 +1,268 @@
 package bigcache
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
-
-	"github.com/allegro/bigcache/v2/queue"
 )
 
-type onRemoveCallback func(wrappedEntry []byte, reason RemoveReason)
-
-// Metadata contains information of a specific entry
-type Metadata struct {
-	RequestCount uint32
-}
-
 type cacheShard struct {
-	hashmap     map[uint64]uint32
-	entries     queue.BytesQueue
-	lock        sync.RWMutex
-	entryBuffer []byte
-	onRemove    onRemoveCallback
-
-	isVerbose    bool
-	statsEnabled bool
-	logger       Logger
-	clock        clock
-	lifeWindow   uint64
-
-	hashmapStats map[uint64]uint32
-	stats        Stats
+	sync.RWMutex
+	hashmap    map[uint64]qref
+	entries    *bytesQueue
+	onRemove   OnRemoveCallback
+	lifeWindow uint64
+	clock      clock
+	logger     Logger
+	stats      Stats
 }
 
-func (s *cacheShard) getWithInfo(key string, hashedKey uint64) (entry []byte, resp Response, err error) {
-	currentTime := uint64(s.clock.epoch())
-	s.lock.RLock()
-	wrappedEntry, err := s.getWrappedEntry(hashedKey)
-	if err != nil {
-		s.lock.RUnlock()
-		return nil, resp, err
-	}
-	if entryKey := readKeyFromEntry(wrappedEntry); key != entryKey {
-		s.lock.RUnlock()
-		s.collision()
-		if s.isVerbose {
-			s.logger.Printf("Collision detected. Both %q and %q have the same hash %x", key, entryKey, hashedKey)
-		}
-		return nil, resp, ErrEntryNotFound
-	}
+func (s *cacheShard) get(key string, hash uint64, f Processor) ([]byte, error) {
 
-	entry = readEntry(wrappedEntry)
-	oldestTimeStamp := readTimestampFromEntry(wrappedEntry)
-	s.lock.RUnlock()
-	s.hit(hashedKey)
-	if currentTime-oldestTimeStamp >= s.lifeWindow {
-		resp.EntryStatus = Expired
-	}
-	return entry, resp, nil
+	s.RLock()
+	defer s.RUnlock()
+
+	return s.getWithoutLock(key, hash, f)
 }
 
-func (s *cacheShard) get(key string, hashedKey uint64) ([]byte, error) {
-	s.lock.RLock()
-	wrappedEntry, err := s.getWrappedEntry(hashedKey)
-	if err != nil {
-		s.lock.RUnlock()
-		return nil, err
-	}
-	if entryKey := readKeyFromEntry(wrappedEntry); key != entryKey {
-		s.lock.RUnlock()
-		s.collision()
-		if s.isVerbose {
-			s.logger.Printf("Collision detected. Both %q and %q have the same hash %x", key, entryKey, hashedKey)
-		}
-		return nil, ErrEntryNotFound
-	}
-	entry := readEntry(wrappedEntry)
-	s.lock.RUnlock()
-	s.hit(hashedKey)
-
-	return entry, nil
-}
-
-func (s *cacheShard) getWithoutLock(key string, hashedKey uint64) ([]byte, error) {
-	wrappedEntry, err := s.getWrappedEntry(hashedKey)
-	if err != nil {
-		return nil, err
-	}
-	if entryKey := readKeyFromEntry(wrappedEntry); key != entryKey {
-		s.collision()
-		if s.isVerbose {
-			s.logger.Printf("Collision detected. Both %q and %q have the same hash %x", key, entryKey, hashedKey)
-		}
-		return nil, ErrEntryNotFound
-	}
-	entry := readEntry(wrappedEntry)
-	s.hitWithoutLock(hashedKey)
-
-	return entry, nil
-}
-
-func (s *cacheShard) getWrappedEntry(hashedKey uint64) ([]byte, error) {
-	itemIndex := s.hashmap[hashedKey]
-
-	if itemIndex == 0 {
+func (s *cacheShard) getWithoutLock(key string, hash uint64, f Processor) ([]byte, error) {
+	ref, found := s.hashmap[hash]
+	if !found {
 		s.miss()
 		return nil, ErrEntryNotFound
 	}
-
-	wrappedEntry, err := s.entries.Get(int(itemIndex))
+	err := s.entries.peek(ref)
 	if err != nil {
 		s.miss()
 		return nil, err
 	}
-
-	return wrappedEntry, err
+	if s.entries.collide(ref, []byte(key)) {
+		// TODO: do we actually need this print - our logger is not level'ed?
+		s.logger.Printf("Collision detected. Both %q and %q have the same hash %x", key, s.entries.getKey(ref), hash)
+		s.collision()
+		return nil, ErrEntryNotFound
+	}
+	s.hit()
+	if f != nil {
+		ce, _ := s.entries.get(ref)
+		return nil, f(ce)
+	}
+	return s.entries.getDataCopy(ref), nil
 }
 
-func (s *cacheShard) set(key string, hashedKey uint64, entry []byte) error {
-	currentTimestamp := uint64(s.clock.epoch())
+func (s *cacheShard) set(key string, hash uint64, entry []byte) error {
 
-	s.lock.Lock()
+	s.Lock()
+	defer s.Unlock()
 
-	if previousIndex := s.hashmap[hashedKey]; previousIndex != 0 {
-		if previousEntry, err := s.entries.Get(int(previousIndex)); err == nil {
-			resetKeyFromEntry(previousEntry)
+	return s.setWithoutLock(key, hash, entry)
+}
+
+func (s *cacheShard) setWithoutLock(key string, hash uint64, entry []byte) error {
+
+	current := s.clock.epoch()
+
+	if prev, found := s.hashmap[hash]; found {
+		if err := s.entries.delete(prev); err == nil {
+			delete(s.hashmap, hash)
 		}
 	}
 
-	if oldestEntry, err := s.entries.Peek(); err == nil {
-		s.onEvict(oldestEntry, currentTimestamp, s.removeOldestEntry)
+	if oldest, err := s.entries.oldest(); err == nil {
+		if current-s.entries.getTS(oldest) > s.lifeWindow {
+			_ = s.evictOldest(Expired)
+		}
 	}
 
-	w := wrapEntry(currentTimestamp, hashedKey, key, entry, &s.entryBuffer)
+	ce := &CacheEntry{
+		TS:   current,
+		Hash: hash,
+		Key:  []byte(key),
+		Data: entry,
+	}
 
 	for {
-		if index, err := s.entries.Push(w); err == nil {
-			s.hashmap[hashedKey] = uint32(index)
-			s.lock.Unlock()
+		if ref, err := s.entries.push(ce); err == nil {
+			s.hashmap[hash] = ref
 			return nil
 		}
-		if s.removeOldestEntry(NoSpace) != nil {
-			s.lock.Unlock()
-			return fmt.Errorf("entry is bigger than max shard size")
+		if err := s.evictOldest(NoSpace); err != nil {
+			return fmt.Errorf("new entry is bigger than max shard size: %w", err)
 		}
 	}
 }
 
-func (s *cacheShard) setWithoutLock(key string, hashedKey uint64, entry []byte) error {
-	currentTimestamp := uint64(s.clock.epoch())
+func (s *cacheShard) cleanUp(timestamp uint64) {
 
-	if previousIndex := s.hashmap[hashedKey]; previousIndex != 0 {
-		if previousEntry, err := s.entries.Get(int(previousIndex)); err == nil {
-			resetKeyFromEntry(previousEntry)
-		}
-	}
+	s.Lock()
+	defer s.Unlock()
 
-	if oldestEntry, err := s.entries.Peek(); err == nil {
-		s.onEvict(oldestEntry, currentTimestamp, s.removeOldestEntry)
-	}
-
-	w := wrapEntry(currentTimestamp, hashedKey, key, entry, &s.entryBuffer)
-
+	var oldest qref
+	var err error
 	for {
-		if index, err := s.entries.Push(w); err == nil {
-			s.hashmap[hashedKey] = uint32(index)
-			return nil
+		if oldest, err = s.entries.oldest(); err != nil {
+			break
 		}
-		if s.removeOldestEntry(NoSpace) != nil {
-			return fmt.Errorf("entry is bigger than max shard size")
+		if timestamp-s.entries.getTS(oldest) <= s.lifeWindow {
+			break
+		}
+		if err = s.evictOldest(Expired); err != nil {
+			break
 		}
 	}
 }
 
-func (s *cacheShard) append(key string, hashedKey uint64, entry []byte) error {
-	s.lock.Lock()
-	var newEntry []byte
-	oldEntry, err := s.getWithoutLock(key, hashedKey)
+func (s *cacheShard) evictOldest(reason RemoveReason) error {
+	oldest, err := s.entries.pop()
 	if err != nil {
-		if err != ErrEntryNotFound {
-			s.lock.Unlock()
-			return err
-		}
-	} else {
-		newEntry = oldEntry
+		return err
+	}
+	hash := s.entries.getHash(oldest)
+	if hash == 0 {
+		// ignore explicitly deleted entries
+		return nil
+	}
+	delete(s.hashmap, hash)
+
+	// NOTE: User should not have a call back just to count evictions - it is expensive
+	switch reason {
+	case Expired:
+		s.expired()
+	case NoSpace:
+		s.nospace()
+	case Deleted:
+		fallthrough
+	case NoReason:
+		panic("this should never happen")
 	}
 
-	newEntry = append(newEntry, entry...)
-	err = s.setWithoutLock(key, hashedKey, newEntry)
-	s.lock.Unlock()
-	return err
+	if s.onRemove != nil {
+		// only allocate memory if needed
+		ce, _ := s.entries.get(oldest)
+		s.onRemove(ce, reason)
+	}
+	return nil
 }
 
-func (s *cacheShard) del(hashedKey uint64) error {
-	// Optimistic pre-check using only readlock
-	s.lock.RLock()
-	{
-		itemIndex := s.hashmap[hashedKey]
+func (s *cacheShard) append(key string, hash uint64, entry []byte) error {
 
-		if itemIndex == 0 {
-			s.lock.RUnlock()
-			s.delmiss()
-			return ErrEntryNotFound
-		}
+	s.Lock()
+	defer s.Unlock()
 
-		if err := s.entries.CheckGet(int(itemIndex)); err != nil {
-			s.lock.RUnlock()
-			s.delmiss()
+	var data []byte
+	appender := func(ce *CacheEntry) error {
+		data = append(ce.CopyData(len(ce.Data)+len(entry)), entry...)
+		return nil
+	}
+
+	if _, err := s.getWithoutLock(key, hash, appender); err != nil {
+		if !errors.Is(err, ErrEntryNotFound) {
 			return err
 		}
+		data = entry
 	}
-	s.lock.RUnlock()
+	return s.setWithoutLock(key, hash, data)
+}
 
-	s.lock.Lock()
-	{
-		// After obtaining the writelock, we need to read the same again,
-		// since the data delivered earlier may be stale now
-		itemIndex := s.hashmap[hashedKey]
+func (s *cacheShard) del(hash uint64) error {
 
-		if itemIndex == 0 {
-			s.lock.Unlock()
-			s.delmiss()
-			return ErrEntryNotFound
-		}
+	s.Lock()
+	defer s.Unlock()
 
-		wrappedEntry, err := s.entries.Get(int(itemIndex))
-		if err != nil {
-			s.lock.Unlock()
-			s.delmiss()
-			return err
-		}
-
-		delete(s.hashmap, hashedKey)
-		s.onRemove(wrappedEntry, Deleted)
-		if s.statsEnabled {
-			delete(s.hashmapStats, hashedKey)
-		}
-		resetKeyFromEntry(wrappedEntry)
+	ref, found := s.hashmap[hash]
+	if !found {
+		s.delmiss()
+		return ErrEntryNotFound
 	}
-	s.lock.Unlock()
 
+	if err := s.entries.delete(ref); err != nil {
+		s.delmiss()
+		return err
+	}
+
+	delete(s.hashmap, hash)
+	if s.onRemove != nil {
+		// only allocate memory if needed
+		ce, _ := s.entries.get(ref)
+		// restore hash value - it was set to 0 by deletion
+		ce.Hash = hash
+		s.onRemove(ce, Deleted)
+	}
 	s.delhit()
 	return nil
 }
 
-func (s *cacheShard) onEvict(oldestEntry []byte, currentTimestamp uint64, evict func(reason RemoveReason) error) bool {
-	oldestTimestamp := readTimestampFromEntry(oldestEntry)
-	if currentTimestamp-oldestTimestamp > s.lifeWindow {
-		evict(Expired)
-		return true
+// Used during Range only - does not update stats and does not check for collisions.
+// NOTE: always returns entry if found, even if processor produces error.
+func (s *cacheShard) getEntry(r qref, f Processor) (*CacheEntry, error) {
+
+	s.RLock()
+	defer s.RUnlock()
+
+	ce, err := s.entries.get(r)
+	if err != nil {
+		return nil, err
 	}
-	return false
+	if f != nil {
+		return ce, f(ce)
+	}
+	return ce, nil
 }
 
-func (s *cacheShard) cleanUp(currentTimestamp uint64) {
-	s.lock.Lock()
-	for {
-		if oldestEntry, err := s.entries.Peek(); err != nil {
-			break
-		} else if evicted := s.onEvict(oldestEntry, currentTimestamp, s.removeOldestEntry); !evicted {
-			break
-		}
+// Used during Range only - expensive copy of entry references available in the shard's queue at the moment.
+func (s *cacheShard) copyRefs() []qref {
+
+	s.RLock()
+	defer s.RUnlock()
+
+	indices := make([]qref, 0, len(s.hashmap))
+	for _, r := range s.hashmap {
+		indices = append(indices, r)
 	}
-	s.lock.Unlock()
-}
-
-func (s *cacheShard) getEntry(index int) ([]byte, error) {
-	s.lock.RLock()
-	entry, err := s.entries.Get(index)
-	s.lock.RUnlock()
-
-	return entry, err
-}
-
-func (s *cacheShard) copyKeys() (keys []uint32, next int) {
-	s.lock.RLock()
-	keys = make([]uint32, len(s.hashmap))
-
-	for _, index := range s.hashmap {
-		keys[next] = index
-		next++
-	}
-
-	s.lock.RUnlock()
-	return keys, next
-}
-
-func (s *cacheShard) removeOldestEntry(reason RemoveReason) error {
-	oldest, err := s.entries.Pop()
-	if err == nil {
-		hash := readHashFromEntry(oldest)
-		if hash == 0 {
-			// entry has been explicitly deleted with resetKeyFromEntry, ignore
-			return nil
-		}
-		delete(s.hashmap, hash)
-		s.onRemove(oldest, reason)
-		if s.statsEnabled {
-			delete(s.hashmapStats, hash)
-		}
-		return nil
-	}
-	return err
+	return indices
 }
 
 func (s *cacheShard) reset(config Config) {
-	s.lock.Lock()
-	s.hashmap = make(map[uint64]uint32, config.initialShardSize())
-	s.entryBuffer = make([]byte, config.MaxEntrySize+headersSizeInBytes)
-	s.entries.Reset()
-	s.lock.Unlock()
+
+	s.Lock()
+	defer s.Unlock()
+
+	s.hashmap = make(map[uint64]qref, config.initialShardSize())
+	s.entries.reset()
 }
 
 func (s *cacheShard) len() int {
-	s.lock.RLock()
+
+	s.RLock()
+	defer s.RUnlock()
+
 	res := len(s.hashmap)
-	s.lock.RUnlock()
 	return res
 }
 
-func (s *cacheShard) capacity() int {
-	s.lock.RLock()
-	res := s.entries.Capacity()
-	s.lock.RUnlock()
+func (s *cacheShard) cap() int {
+	s.RLock()
+	defer s.RUnlock()
+	res := s.entries.cap()
 	return res
 }
 
 func (s *cacheShard) getStats() Stats {
 	var stats = Stats{
-		Hits:       atomic.LoadInt64(&s.stats.Hits),
-		Misses:     atomic.LoadInt64(&s.stats.Misses),
-		DelHits:    atomic.LoadInt64(&s.stats.DelHits),
-		DelMisses:  atomic.LoadInt64(&s.stats.DelMisses),
-		Collisions: atomic.LoadInt64(&s.stats.Collisions),
+		Hits:           atomic.LoadInt64(&s.stats.Hits),
+		Misses:         atomic.LoadInt64(&s.stats.Misses),
+		DelHits:        atomic.LoadInt64(&s.stats.DelHits),
+		DelMisses:      atomic.LoadInt64(&s.stats.DelMisses),
+		Collisions:     atomic.LoadInt64(&s.stats.Collisions),
+		EvictedExpired: atomic.LoadInt64(&s.stats.EvictedExpired),
+		EvictedNoSpace: atomic.LoadInt64(&s.stats.EvictedNoSpace),
 	}
 	return stats
 }
 
-func (s *cacheShard) getKeyMetadata(key uint64) Metadata {
-	return Metadata{
-		RequestCount: s.hashmapStats[key],
-	}
-}
-
-func (s *cacheShard) hit(key uint64) {
+func (s *cacheShard) hit() {
 	atomic.AddInt64(&s.stats.Hits, 1)
-	if s.statsEnabled {
-		s.lock.Lock()
-		s.hashmapStats[key]++
-		s.lock.Unlock()
-	}
-}
-
-func (s *cacheShard) hitWithoutLock(key uint64) {
-	atomic.AddInt64(&s.stats.Hits, 1)
-	if s.statsEnabled {
-		s.hashmapStats[key]++
-	}
 }
 
 func (s *cacheShard) miss() {
@@ -374,18 +281,21 @@ func (s *cacheShard) collision() {
 	atomic.AddInt64(&s.stats.Collisions, 1)
 }
 
-func initNewShard(config Config, callback onRemoveCallback, clock clock) *cacheShard {
-	return &cacheShard{
-		hashmap:      make(map[uint64]uint32, config.initialShardSize()),
-		hashmapStats: make(map[uint64]uint32, config.initialShardSize()),
-		entries:      *queue.NewBytesQueue(config.initialShardSize()*config.MaxEntrySize, config.maximumShardSize(), config.Verbose),
-		entryBuffer:  make([]byte, config.MaxEntrySize+headersSizeInBytes),
-		onRemove:     callback,
+func (s *cacheShard) expired() {
+	atomic.AddInt64(&s.stats.EvictedExpired, 1)
+}
 
-		isVerbose:    config.Verbose,
-		logger:       newLogger(config.Logger),
-		clock:        clock,
-		lifeWindow:   uint64(config.LifeWindow.Seconds()),
-		statsEnabled: config.StatsEnabled,
+func (s *cacheShard) nospace() {
+	atomic.AddInt64(&s.stats.EvictedNoSpace, 1)
+}
+
+func initNewShard(config Config, clock clock) *cacheShard {
+	return &cacheShard{
+		hashmap:    make(map[uint64]qref, config.initialShardSize()),
+		entries:    newBytesQueue(config.initialShardSize()*config.MaxEntrySize, config.maximumShardSize(), config.Logger),
+		onRemove:   config.OnRemove,
+		logger:     config.Logger,
+		clock:      clock,
+		lifeWindow: uint64(config.LifeWindow.Seconds()),
 	}
 }

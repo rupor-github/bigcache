@@ -2,7 +2,21 @@ package bigcache
 
 import "time"
 
-// Config for BigCache
+// RemoveReason is a value used to signal to the user why a particular key was removed in the OnRemove callback.
+type RemoveReason int
+
+const (
+	NoReason RemoveReason = iota
+	Expired               // key is past its LifeWindow.
+	NoSpace               // key is the oldest and the cache size was at its maximum when Set() was called, or entry size exceeded the maximum shard size.
+	Deleted               // key was removed as a result of Delete() call
+
+	minimumEntriesInShard = 10 // Minimum number of entries in single shard
+)
+
+type OnRemoveCallback func(*CacheEntry, RemoveReason)
+
+// Config for BigCache.
 type Config struct {
 	// Number of cache shards, value must be a power of two
 	Shards int
@@ -16,10 +30,6 @@ type Config struct {
 	MaxEntriesInWindow int
 	// Max size of entry in bytes. Used only to calculate initial size for cache shards.
 	MaxEntrySize int
-	// StatsEnabled if true calculate the number of times a cached resource was requested.
-	StatsEnabled bool
-	// Verbose mode prints information about new memory allocation
-	Verbose bool
 	// Hasher used to map between string keys and unsigned 64bit integers, by default fnv64 hashing is used.
 	Hasher Hasher
 	// HardMaxCacheSize is a limit for cache size in MB. Cache will not allocate more memory than this limit.
@@ -27,29 +37,15 @@ type Config struct {
 	// Default value is 0 which means unlimited size. When the limit is higher than 0 and reached then
 	// the oldest entries are overridden for the new ones.
 	HardMaxCacheSize int
-	// OnRemove is a callback fired when the oldest entry is removed because of its expiration time or no space left
+	// OnRemove is a callback fired when the entry is removed because of its expiration time or no space left
 	// for the new entry, or because delete was called.
-	// Default value is nil which means no callback and it prevents from unwrapping the oldest entry.
-	// ignored if OnRemoveWithMetadata is specified.
-	OnRemove func(key string, entry []byte)
-	// OnRemoveWithMetadata is a callback fired when the oldest entry is removed because of its expiration time or no space left
-	// for the new entry, or because delete was called. A structure representing details about that specific entry.
-	// Default value is nil which means no callback and it prevents from unwrapping the oldest entry.
-	OnRemoveWithMetadata func(key string, entry []byte, keyMetadata Metadata)
-	// OnRemoveWithReason is a callback fired when the oldest entry is removed because of its expiration time or no space left
-	// for the new entry, or because delete was called. A constant representing the reason will be passed through.
-	// Default value is nil which means no callback and it prevents from unwrapping the oldest entry.
-	// Ignored if OnRemove is specified.
-	OnRemoveWithReason func(key string, entry []byte, reason RemoveReason)
-
-	onRemoveFilter int
-
-	// Logger is a logging interface and used in combination with `Verbose`
-	// Defaults to `DefaultLogger()`
+	// Default value is nil which means no callback
+	OnRemove OnRemoveCallback
+	// Logger is a logging interface. Defaults to `NopLogger()`
 	Logger Logger
 }
 
-// DefaultConfig initializes config with default values.
+// DefaultConfig initializes config with sane default values.
 // When load for BigCache can be predicted in advance then it is better to use custom config.
 func DefaultConfig(eviction time.Duration) Config {
 	return Config{
@@ -58,20 +54,18 @@ func DefaultConfig(eviction time.Duration) Config {
 		CleanWindow:        1 * time.Second,
 		MaxEntriesInWindow: 1000 * 10 * 60,
 		MaxEntrySize:       500,
-		StatsEnabled:       false,
-		Verbose:            true,
 		Hasher:             newDefaultHasher(),
 		HardMaxCacheSize:   0,
 		Logger:             DefaultLogger(),
 	}
 }
 
-// initialShardSize computes initial shard size
+// initialShardSize computes initial shard size.
 func (c Config) initialShardSize() int {
 	return max(min(c.MaxEntriesInWindow/c.Shards, c.maximumShardSize()), minimumEntriesInShard)
 }
 
-// maximumShardSize computes maximum shard size
+// maximumShardSize computes maximum shard size.
 func (c Config) maximumShardSize() int {
 	maxShardSize := 0
 
@@ -80,15 +74,4 @@ func (c Config) maximumShardSize() int {
 	}
 
 	return maxShardSize
-}
-
-// OnRemoveFilterSet sets which remove reasons will trigger a call to OnRemoveWithReason.
-// Filtering out reasons prevents bigcache from unwrapping them, which saves cpu.
-func (c Config) OnRemoveFilterSet(reasons ...RemoveReason) Config {
-	c.onRemoveFilter = 0
-	for i := range reasons {
-		c.onRemoveFilter |= 1 << uint(reasons[i])
-	}
-
-	return c
 }

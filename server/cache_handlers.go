@@ -25,7 +25,7 @@ func getCacheHandler(w http.ResponseWriter, r *http.Request) {
 	target := r.URL.Path[len(cachePath):]
 	if target == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("can't get a key if there is no key."))
+		_, _ = w.Write([]byte("can't get a key if there is no key."))
 		log.Print("empty request.")
 		return
 	}
@@ -41,14 +41,14 @@ func getCacheHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	w.Write(entry)
+	_, _ = w.Write(entry)
 }
 
 func putCacheHandler(w http.ResponseWriter, r *http.Request) {
 	target := r.URL.Path[len(cachePath):]
 	if target == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("can't put a key if there is no key."))
+		_, _ = w.Write([]byte("can't put a key if there is no key."))
 		log.Print("empty request.")
 		return
 	}
@@ -60,7 +60,7 @@ func putCacheHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := cache.Set(target, []byte(entry)); err != nil {
+	if err := cache.Set(target, entry); err != nil {
 		log.Print(err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -83,5 +83,4 @@ func deleteCacheHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// this is what the RFC says to use when calling DELETE.
 	w.WriteHeader(http.StatusOK)
-	return
 }

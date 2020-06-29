@@ -1,12 +1,13 @@
 package bigcache
 
 import (
-	"fmt"
+	"errors"
 	"time"
 )
 
-const (
-	minimumEntriesInShard = 10 // Minimum number of entries in single shard
+var (
+	ErrEntryNotFound       = errors.New("entry not found")
+	ErrInvalidShardsNumber = errors.New("invalid number of shards, must be power of two")
 )
 
 // BigCache is fast, concurrent, evicting cache created to keep big number of entries without impact on performance.
@@ -14,7 +15,6 @@ const (
 // therefore entries (de)serialization in front of the cache will be needed in most use cases.
 type BigCache struct {
 	shards       []*cacheShard
-	lifeWindow   uint64
 	clock        clock
 	hash         Hasher
 	config       Config
@@ -23,25 +23,12 @@ type BigCache struct {
 	close        chan struct{}
 }
 
-// Response will contain metadata about the entry for which GetWithInfo(key) was called
-type Response struct {
-	EntryStatus RemoveReason
-}
+// Processor is a closure supplied to set of WithProcessing functions to take ownership of data []byte avoiding extra memory
+// allocation and copy. It has access to exported CacheEntry interface, including byte slice pointing to actual underlying shard buffer
+// (not a copy!).
+type Processor func(*CacheEntry) error
 
-// RemoveReason is a value used to signal to the user why a particular key was removed in the OnRemove callback.
-type RemoveReason uint32
-
-const (
-	// Expired means the key is past its LifeWindow.
-	Expired = RemoveReason(1)
-	// NoSpace means the key is the oldest and the cache size was at its maximum when Set was called, or the
-	// entry exceeded the maximum shard size.
-	NoSpace = RemoveReason(2)
-	// Deleted means Delete was called and this key was removed as a result.
-	Deleted = RemoveReason(3)
-)
-
-// NewBigCache initialize new instance of BigCache
+// NewBigCache initializes new instance of BigCache.
 func NewBigCache(config Config) (*BigCache, error) {
 	return newBigCache(config, &systemClock{})
 }
@@ -49,16 +36,18 @@ func NewBigCache(config Config) (*BigCache, error) {
 func newBigCache(config Config, clock clock) (*BigCache, error) {
 
 	if !isPowerOfTwo(config.Shards) {
-		return nil, fmt.Errorf("Shards number must be power of two")
+		return nil, ErrInvalidShardsNumber
 	}
 
 	if config.Hasher == nil {
 		config.Hasher = newDefaultHasher()
 	}
+	if config.Logger == nil {
+		config.Logger = newNopLogger()
+	}
 
 	cache := &BigCache{
 		shards:       make([]*cacheShard, config.Shards),
-		lifeWindow:   uint64(config.LifeWindow.Seconds()),
 		clock:        clock,
 		hash:         config.Hasher,
 		config:       config,
@@ -67,19 +56,8 @@ func newBigCache(config Config, clock clock) (*BigCache, error) {
 		close:        make(chan struct{}),
 	}
 
-	var onRemove func(wrappedEntry []byte, reason RemoveReason)
-	if config.OnRemoveWithMetadata != nil {
-		onRemove = cache.providedOnRemoveWithMetadata
-	} else if config.OnRemove != nil {
-		onRemove = cache.providedOnRemove
-	} else if config.OnRemoveWithReason != nil {
-		onRemove = cache.providedOnRemoveWithReason
-	} else {
-		onRemove = cache.notProvidedOnRemove
-	}
-
 	for i := 0; i < config.Shards; i++ {
-		cache.shards[i] = initNewShard(config, onRemove, clock)
+		cache.shards[i] = initNewShard(config, clock)
 	}
 
 	if config.CleanWindow > 0 {
@@ -96,7 +74,6 @@ func newBigCache(config Config, clock clock) (*BigCache, error) {
 			}
 		}()
 	}
-
 	return cache, nil
 }
 
@@ -108,25 +85,25 @@ func (c *BigCache) Close() error {
 	return nil
 }
 
-// Get reads entry for the key.
-// It returns an ErrEntryNotFound when
-// no entry exists for the given key.
+// Get reads entry for the key returning copy of cached data.
+// It returns an ErrEntryNotFound when no entry exists for the given key.
 func (c *BigCache) Get(key string) ([]byte, error) {
 	hashedKey := c.hash.Sum64(key)
 	shard := c.getShard(hashedKey)
-	return shard.get(key, hashedKey)
+	return shard.get(key, hashedKey, nil)
 }
 
-// GetWithInfo reads entry for the key with Response info.
-// It returns an ErrEntryNotFound when
-// no entry exists for the given key.
-func (c *BigCache) GetWithInfo(key string) ([]byte, Response, error) {
+// GetWithProcessing reads entry for the key.
+// If found it gives provided Processor closure a chance to process cached entry effectively.
+// It returns an ErrEntryNotFound when no entry exists for the given key.
+func (c *BigCache) GetWithProcessing(key string, processor Processor) error {
 	hashedKey := c.hash.Sum64(key)
 	shard := c.getShard(hashedKey)
-	return shard.getWithInfo(key, hashedKey)
+	_, err := shard.get(key, hashedKey, processor)
+	return err
 }
 
-// Set saves entry under the key
+// Set saves entry under the key.
 func (c *BigCache) Set(key string, entry []byte) error {
 	hashedKey := c.hash.Sum64(key)
 	shard := c.getShard(hashedKey)
@@ -142,14 +119,14 @@ func (c *BigCache) Append(key string, entry []byte) error {
 	return shard.append(key, hashedKey, entry)
 }
 
-// Delete removes the key
+// Delete removes the key.
 func (c *BigCache) Delete(key string) error {
 	hashedKey := c.hash.Sum64(key)
 	shard := c.getShard(hashedKey)
 	return shard.del(hashedKey)
 }
 
-// Reset empties all cache shards
+// Reset empties all cache shards.
 func (c *BigCache) Reset() error {
 	for _, shard := range c.shards {
 		shard.reset(c.config)
@@ -157,7 +134,7 @@ func (c *BigCache) Reset() error {
 	return nil
 }
 
-// Len computes number of entries in cache
+// Len computes number of entries in cache.
 func (c *BigCache) Len() int {
 	var len int
 	for _, shard := range c.shards {
@@ -170,12 +147,12 @@ func (c *BigCache) Len() int {
 func (c *BigCache) Capacity() int {
 	var len int
 	for _, shard := range c.shards {
-		len += shard.capacity()
+		len += shard.cap()
 	}
 	return len
 }
 
-// Stats returns cache's statistics
+// Stats returns cache's statistics.
 func (c *BigCache) Stats() Stats {
 	var s Stats
 	for _, shard := range c.shards {
@@ -185,29 +162,51 @@ func (c *BigCache) Stats() Stats {
 		s.DelHits += tmp.DelHits
 		s.DelMisses += tmp.DelMisses
 		s.Collisions += tmp.Collisions
+		s.EvictedExpired += tmp.EvictedExpired
+		s.EvictedNoSpace += tmp.EvictedNoSpace
 	}
 	return s
 }
 
-// KeyMetadata returns number of times a cached resource was requested.
-func (c *BigCache) KeyMetadata(key string) Metadata {
-	hashedKey := c.hash.Sum64(key)
-	shard := c.getShard(hashedKey)
-	return shard.getKeyMetadata(hashedKey)
-}
+// Range attempts to call f sequentially for each key and value present in the cache.
+// If at any point f returns ErrEntryNotFound, Range stops the iteration.
+//
+// Range does not necessarily correspond to any consistent snapshot of the cache
+// contents: no entry will be visited more than once, but if the entry is stored
+// or deleted concurrently, Range may reflect any mapping for that entry from any
+// point during the Range call or miss it completely.
+//
+// Range may be O(N) with the number of elements in the map even if f returns
+// false after a constant number of calls.
+//
+// Range is replacement for over-complicated EntryInfoIterator.
+func (c *BigCache) Range(f Processor) error {
 
-// Iterator returns iterator function to iterate over EntryInfo's from whole cache.
-func (c *BigCache) Iterator() *EntryInfoIterator {
-	return newIterator(c)
-}
-
-func (c *BigCache) onEvict(oldestEntry []byte, currentTimestamp uint64, evict func(reason RemoveReason) error) bool {
-	oldestTimestamp := readTimestampFromEntry(oldestEntry)
-	if currentTimestamp-oldestTimestamp > c.lifeWindow {
-		evict(Expired)
-		return true
+	// make sure entry is safe to use while shard is unlocked
+	duplicator := func(ce *CacheEntry) error {
+		ce.Data = ce.CopyData(0)
+		ce.Key = append([]byte{}, ce.Key...)
+		return nil
 	}
-	return false
+
+	for _, shard := range c.shards {
+		// taking snapshot of shard indices
+		for _, ref := range shard.copyRefs() {
+			if entry, err := shard.getEntry(ref, duplicator); err != nil {
+				if !errors.Is(err, ErrEntryNotFound) {
+					return err
+				}
+				continue
+			} else if err = f(entry); err != nil {
+				if errors.Is(err, ErrEntryNotFound) {
+					// stop is requested
+					return nil
+				}
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (c *BigCache) cleanUp(currentTimestamp uint64) {
@@ -218,23 +217,4 @@ func (c *BigCache) cleanUp(currentTimestamp uint64) {
 
 func (c *BigCache) getShard(hashedKey uint64) (shard *cacheShard) {
 	return c.shards[hashedKey&c.shardMask]
-}
-
-func (c *BigCache) providedOnRemove(wrappedEntry []byte, reason RemoveReason) {
-	c.config.OnRemove(readKeyFromEntry(wrappedEntry), readEntry(wrappedEntry))
-}
-
-func (c *BigCache) providedOnRemoveWithReason(wrappedEntry []byte, reason RemoveReason) {
-	if c.config.onRemoveFilter == 0 || (1<<uint(reason))&c.config.onRemoveFilter > 0 {
-		c.config.OnRemoveWithReason(readKeyFromEntry(wrappedEntry), readEntry(wrappedEntry), reason)
-	}
-}
-
-func (c *BigCache) notProvidedOnRemove(wrappedEntry []byte, reason RemoveReason) {
-}
-
-func (c *BigCache) providedOnRemoveWithMetadata(wrappedEntry []byte, reason RemoveReason) {
-	hashedKey := c.hash.Sum64(readKeyFromEntry(wrappedEntry))
-	shard := c.getShard(hashedKey)
-	c.config.OnRemoveWithMetadata(readKeyFromEntry(wrappedEntry), readEntry(wrappedEntry), shard.getKeyMetadata(hashedKey))
 }
