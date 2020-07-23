@@ -93,6 +93,14 @@ func (c *BigCache) Get(key string) ([]byte, error) {
 	return shard.get(key, hashedKey, nil)
 }
 
+// GetHashed reads entry for the key returning copy of cached data.
+// It returns an ErrEntryNotFound when no entry exists for the given key.
+// NOTE: it expectes already hashed key.
+func (c *BigCache) GetHashed(hashedKey uint64) ([]byte, error) {
+	shard := c.getShard(hashedKey)
+	return shard.get("", hashedKey, nil)
+}
+
 // GetWithProcessing reads entry for the key.
 // If found it gives provided Processor closure a chance to process cached entry effectively.
 // It returns an ErrEntryNotFound when no entry exists for the given key.
@@ -103,11 +111,28 @@ func (c *BigCache) GetWithProcessing(key string, processor Processor) error {
 	return err
 }
 
+// GetHashedWithProcessing reads entry for the key.
+// If found it gives provided Processor closure a chance to process cached entry effectively.
+// It returns an ErrEntryNotFound when no entry exists for the given key.
+// NOTE: it expectes already hashed key.
+func (c *BigCache) GetHashedWithProcessing(hashedKey uint64, processor Processor) error {
+	shard := c.getShard(hashedKey)
+	_, err := shard.get("", hashedKey, processor)
+	return err
+}
+
 // Set saves entry under the key.
 func (c *BigCache) Set(key string, entry []byte) error {
 	hashedKey := c.hash.Sum64(key)
 	shard := c.getShard(hashedKey)
 	return shard.set(key, hashedKey, entry)
+}
+
+// SetHashed saves entry under the key.
+// NOTE: it expectes already hashed key.
+func (c *BigCache) SetHashed(hashedKey uint64, entry []byte) error {
+	shard := c.getShard(hashedKey)
+	return shard.set("", hashedKey, entry)
 }
 
 // Append appends entry under the key if key exists, otherwise
@@ -119,9 +144,25 @@ func (c *BigCache) Append(key string, entry []byte) error {
 	return shard.append(key, hashedKey, entry)
 }
 
+// AppendHashed appends entry under the key if key exists, otherwise
+// it will set the key (same behaviour as Set()). With Append() you can
+// concatenate multiple entries under the same key in an lock optimized way.
+// NOTE: it expectes already hashed key.
+func (c *BigCache) AppendHashed(hashedKey uint64, entry []byte) error {
+	shard := c.getShard(hashedKey)
+	return shard.append("", hashedKey, entry)
+}
+
 // Delete removes the key.
 func (c *BigCache) Delete(key string) error {
 	hashedKey := c.hash.Sum64(key)
+	shard := c.getShard(hashedKey)
+	return shard.del(hashedKey)
+}
+
+// DeleteHashed removes the key.
+// NOTE: it expectes already hashed key.
+func (c *BigCache) DeleteHashed(hashedKey uint64) error {
 	shard := c.getShard(hashedKey)
 	return shard.del(hashedKey)
 }

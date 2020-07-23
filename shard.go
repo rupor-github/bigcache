@@ -37,7 +37,7 @@ func (s *cacheShard) getWithoutLock(key string, hash uint64, f Processor) ([]byt
 		s.miss()
 		return nil, err
 	}
-	if s.entries.collide(ref, []byte(key)) {
+	if len(key) > 0 && s.entries.collide(ref, []byte(key)) {
 		// TODO: do we actually need this print - our logger is not level'ed?
 		s.logger.Printf("Collision detected. Both %q and %q have the same hash %x", key, s.entries.getKey(ref), hash)
 		s.collision()
