@@ -85,6 +85,8 @@ func (c *BigCache) Close() error {
 	return nil
 }
 
+var usingAlreadyHashedKey = ""
+
 // Get reads entry for the key returning copy of cached data.
 // It returns an ErrEntryNotFound when no entry exists for the given key.
 func (c *BigCache) Get(key string) ([]byte, error) {
@@ -98,7 +100,7 @@ func (c *BigCache) Get(key string) ([]byte, error) {
 // NOTE: it expectes already hashed key.
 func (c *BigCache) GetHashed(hashedKey uint64) ([]byte, error) {
 	shard := c.getShard(hashedKey)
-	return shard.get("", hashedKey, nil)
+	return shard.get(usingAlreadyHashedKey, hashedKey, nil)
 }
 
 // GetWithProcessing reads entry for the key.
@@ -117,7 +119,7 @@ func (c *BigCache) GetWithProcessing(key string, processor Processor) error {
 // NOTE: it expectes already hashed key.
 func (c *BigCache) GetHashedWithProcessing(hashedKey uint64, processor Processor) error {
 	shard := c.getShard(hashedKey)
-	_, err := shard.get("", hashedKey, processor)
+	_, err := shard.get(usingAlreadyHashedKey, hashedKey, processor)
 	return err
 }
 
@@ -132,7 +134,7 @@ func (c *BigCache) Set(key string, entry []byte) error {
 // NOTE: it expectes already hashed key.
 func (c *BigCache) SetHashed(hashedKey uint64, entry []byte) error {
 	shard := c.getShard(hashedKey)
-	return shard.set("", hashedKey, entry)
+	return shard.set(usingAlreadyHashedKey, hashedKey, entry)
 }
 
 // Append appends entry under the key if key exists, otherwise
@@ -150,7 +152,7 @@ func (c *BigCache) Append(key string, entry []byte) error {
 // NOTE: it expectes already hashed key.
 func (c *BigCache) AppendHashed(hashedKey uint64, entry []byte) error {
 	shard := c.getShard(hashedKey)
-	return shard.append("", hashedKey, entry)
+	return shard.append(usingAlreadyHashedKey, hashedKey, entry)
 }
 
 // Delete removes the key.
@@ -225,8 +227,8 @@ func (c *BigCache) Range(f Processor) error {
 
 	// make sure entry is safe to use while shard is unlocked
 	duplicator := func(ce *CacheEntry) error {
+		ce.Key = ce.CopyKeyData()
 		ce.Data = ce.CopyData(0)
-		ce.Key = append([]byte{}, ce.Key...)
 		return nil
 	}
 

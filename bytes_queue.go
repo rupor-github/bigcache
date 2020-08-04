@@ -49,8 +49,6 @@ func (q *bytesQueue) push(ce *CacheEntry) (qref, error) {
 			// check before head
 			if q.head.idx()-blobSize >= size {
 				q.tail.wrap()
-			} else if q.maxCapacity > 0 && cap(q.array)+size >= q.maxCapacity {
-				return 0, ErrQueueFull
 			} else if err := q.expand(size); err != nil {
 				return 0, err
 			}
@@ -59,9 +57,6 @@ func (q *bytesQueue) push(ce *CacheEntry) (qref, error) {
 		// oDDDt________hDDDrc
 		// see if entry fits between head and tail
 		if q.head.sub(q.tail)-blobSize < size {
-			if q.maxCapacity > 0 && cap(q.array)+size >= q.maxCapacity {
-				return 0, ErrQueueFull
-			}
 			if err := q.expand(size); err != nil {
 				return 0, err
 			}
@@ -82,6 +77,10 @@ func (q *bytesQueue) push(ce *CacheEntry) (qref, error) {
 
 // reallocates array keeping all existing indices unchanged.
 func (q *bytesQueue) expand(minimum int) error {
+
+	if q.maxCapacity > 0 && cap(q.array)+minimum >= q.maxCapacity {
+		return ErrQueueFull
+	}
 
 	start := time.Now()
 

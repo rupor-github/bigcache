@@ -148,6 +148,16 @@ func (ce *CacheEntry) CopyKey() string {
 	return string(ce.Key)
 }
 
+// CopyKeyData returns copy of Key slice - safe to use without shard lock.
+func (ce *CacheEntry) CopyKeyData() (s []byte) {
+	l := len(ce.Key)
+	if l > 0 {
+		s = make([]byte, l)
+		copy(s, ce.Data)
+	}
+	return
+}
+
 // CopyData returns copy of underlying slice - safe to use without shard lock.
 // As an optimization you could allocate bigger backing array.
 func (ce *CacheEntry) CopyData(newCap int) []byte {
