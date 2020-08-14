@@ -97,7 +97,7 @@ func (c *BigCache) Get(key string) ([]byte, error) {
 
 // GetHashed reads entry for the key returning copy of cached data.
 // It returns an ErrEntryNotFound when no entry exists for the given key.
-// NOTE: it expectes already hashed key.
+// NOTE: it expects already hashed key.
 func (c *BigCache) GetHashed(hashedKey uint64) ([]byte, error) {
 	shard := c.getShard(hashedKey)
 	return shard.get(usingAlreadyHashedKey, hashedKey, nil)
@@ -116,7 +116,7 @@ func (c *BigCache) GetWithProcessing(key string, processor Processor) error {
 // GetHashedWithProcessing reads entry for the key.
 // If found it gives provided Processor closure a chance to process cached entry effectively.
 // It returns an ErrEntryNotFound when no entry exists for the given key.
-// NOTE: it expectes already hashed key.
+// NOTE: it expects already hashed key.
 func (c *BigCache) GetHashedWithProcessing(hashedKey uint64, processor Processor) error {
 	shard := c.getShard(hashedKey)
 	_, err := shard.get(usingAlreadyHashedKey, hashedKey, processor)
@@ -131,7 +131,7 @@ func (c *BigCache) Set(key string, entry []byte) error {
 }
 
 // SetHashed saves entry under the key.
-// NOTE: it expectes already hashed key.
+// NOTE: it expects already hashed key.
 func (c *BigCache) SetHashed(hashedKey uint64, entry []byte) error {
 	shard := c.getShard(hashedKey)
 	return shard.set(usingAlreadyHashedKey, hashedKey, entry)
@@ -149,7 +149,7 @@ func (c *BigCache) Append(key string, entry []byte) error {
 // AppendHashed appends entry under the key if key exists, otherwise
 // it will set the key (same behaviour as Set()). With Append() you can
 // concatenate multiple entries under the same key in an lock optimized way.
-// NOTE: it expectes already hashed key.
+// NOTE: it expects already hashed key.
 func (c *BigCache) AppendHashed(hashedKey uint64, entry []byte) error {
 	shard := c.getShard(hashedKey)
 	return shard.append(usingAlreadyHashedKey, hashedKey, entry)
@@ -163,7 +163,7 @@ func (c *BigCache) Delete(key string) error {
 }
 
 // DeleteHashed removes the key.
-// NOTE: it expectes already hashed key.
+// NOTE: it expects already hashed key.
 func (c *BigCache) DeleteHashed(hashedKey uint64) error {
 	shard := c.getShard(hashedKey)
 	return shard.del(hashedKey)
