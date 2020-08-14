@@ -1,7 +1,7 @@
 <p align="center">
-    <h1 align="center">fb2converter</h1>
+    <h1 align="center">bigcache v3</h1>
     <p align="center">
-        converts fb2 files to epub, kepub, mobi, azw3
+        Reluctant fork of allegro/bigcache/v2
     </p>
     <p align="center">
         <a href="https://pkg.go.dev/mod/github.com/rupor-github/bigcache/v3/?tab=packages"><img alt="GoDoc" src="https://img.shields.io/badge/godoc-reference-blue.svg" /></a>
