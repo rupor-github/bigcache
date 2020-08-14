@@ -1,3 +1,15 @@
+<p align="center">
+    <h1 align="center">fb2converter</h1>
+    <p align="center">
+        converts fb2 files to epub, kepub, mobi, azw3
+    </p>
+    <p align="center">
+        <a href="https://pkg.go.dev/mod/github.com/rupor-github/bigcache/v3/?tab=packages"><img alt="GoDoc" src="https://img.shields.io/badge/godoc-reference-blue.svg" /></a>
+        <a href="https://goreportcard.com/report/github.com/rupor-github/bigcache"><img alt="Go Report Card" src="https://goreportcard.com/badge/github.com/rupor-github/bigcache" /></a>
+    </p>
+    <hr>
+</p>
+
 # BigCache
 
 Fast, concurrent, evicting in-memory cache written to keep big number of entries without impact on performance.
