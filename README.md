@@ -5,7 +5,7 @@
     </p>
     <p align="center">
         <a href="https://pkg.go.dev/github.com/rupor-github/bigcache/v3"><img src="https://pkg.go.dev/badge/github.com/rupor-github/bigcache/v3" alt="PkgGoDev"></a>
-        <a href="https://goreportcard.com/report/github.com/rupor-github/bigcache"><img alt="Go Report Card" src="https://goreportcard.com/badge/github.com/rupor-github/bigcache" alt="GoReport"/>GoReport</a>
+        <a href="https://goreportcard.com/report/github.com/rupor-github/bigcache"><img alt="Go Report Card" src="https://goreportcard.com/badge/github.com/rupor-github/bigcache" alt="GoReport"/></a>
     </p>
     <hr>
 </p>
