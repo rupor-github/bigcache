@@ -12,7 +12,7 @@
 
 # BigCache
 
-[![PkgGoDev](https://pkg.go.dev/badge/rupor-github/bigcache/v3%20)](https://pkg.go.dev/rupor-github/bigcache/v3%20)
+[![PkgGoDev](https://pkg.go.dev/badge/rupor-github/bigcache/v3)](https://pkg.go.dev/rupor-github/bigcache/v3)
 
 Fast, concurrent, evicting in-memory cache written to keep big number of entries without impact on performance.
 BigCache keeps entries on heap but omits GC for them. To achieve that, operations on byte slices take place,
