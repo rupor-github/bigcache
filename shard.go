@@ -290,9 +290,14 @@ func (s *cacheShard) nospace() {
 }
 
 func initNewShard(config Config, clock clock) *cacheShard {
+	bytesQueueInitialCapacity := config.initialShardSize() * config.MaxEntrySize
+	maximumShardSizeInBytes := config.maximumShardSizeInBytes()
+	if maximumShardSizeInBytes > 0 && bytesQueueInitialCapacity > maximumShardSizeInBytes {
+		bytesQueueInitialCapacity = maximumShardSizeInBytes
+	}
 	return &cacheShard{
 		hashmap:    make(map[uint64]qref, config.initialShardSize()),
-		entries:    newBytesQueue(config.initialShardSize()*config.MaxEntrySize, config.maximumShardSize(), config.Logger),
+		entries:    newBytesQueue(bytesQueueInitialCapacity, maximumShardSizeInBytes, config.Logger),
 		onRemove:   config.OnRemove,
 		logger:     config.Logger,
 		clock:      clock,
